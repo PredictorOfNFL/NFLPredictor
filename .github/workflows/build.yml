@@ -1,0 +1,58 @@
+name: Build NFL Model Board
+
+on:
+  schedule:
+    - cron: "0 12 * * *"    # every day at 8am Eastern (12:00 UTC)
+    - cron: "0 7 * * 1,2"   # plus late Sunday and Monday nights, after the games
+  workflow_dispatch:         # adds a "Run workflow" button for updating any time
+    inputs:
+      fetch_props:
+        description: "Pull fresh prop lines now (uses Odds API credits)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Restore saved prop lines
+        uses: actions/cache@v4
+        with:
+          path: prop_lines_cache.json
+          key: prop-lines-${{ github.run_id }}
+          restore-keys: prop-lines-
+      - name: Build the site
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          OUTPUT_FILE: public/index.html
+          FETCH_PROPS: ${{ inputs.fetch_props }}
+        run: python nfl_site.py
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
