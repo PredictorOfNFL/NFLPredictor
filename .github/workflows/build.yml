@@ -45,14 +45,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh issue create --title "Model alerts for $(TZ=America/New_York date +'%b %-d')" --body-file alerts.md
       - name: Save history (so picks can be graded after the games)
+        continue-on-error: true    # never let this stop the site from updating
         run: |
+          if [ ! -f history.json ]; then
+            echo "::warning::history.json was not created. Make sure you uploaded the newest nfl_site.py."
+            exit 0
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add history.json
           if ! git diff --cached --quiet; then
             git commit -m "Update history"
-            git pull --rebase
-            git push
+            git pull --rebase -X theirs || { echo "::warning::Could not merge history.json"; exit 0; }
+            git push || echo "::warning::Could not save history.json. Check Settings > Actions > General > Workflow permissions."
           fi
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
