@@ -402,7 +402,8 @@ for pid, grp in recent_ps.groupby("player_id"):
                    int(r.passing_interceptions or 0), int(r.carries or 0), int(r.rushing_yards or 0),
                    int(r.rushing_tds or 0), int(r.targets or 0), int(r.receptions or 0),
                    int(r.receiving_yards or 0), int(r.receiving_tds or 0), nz(r.fantasy_points_ppr)]
-                  for r in grp.tail(12).itertuples()]
+                  for r in pd.concat([grp[grp.season < CURRENT_SEASON].tail(max(0, 12 - int((grp.season == CURRENT_SEASON).sum()))),
+                                      grp[grp.season == CURRENT_SEASON]]).itertuples()]
 
 # Rising usage: last 2 games compared with the 6 games before that
 risers = []
@@ -1054,6 +1055,30 @@ for t in TEAMS:
                          w=int(cur_w[i]), l=int(cur_l[i]), ties=int(cur_t[i]), pw=nz(wins[:, i].mean()),
                          rating=nz(RATING[i]), **{k: nz(v[i] / N * 100) for k, v in cnt.items()}))
 
+# ---------------------------- Matchup trends ----------------------------
+# For each defense: how players at a position did against it, compared with
+# what those same players usually do (their average going into the game).
+MATCH_KEYS = [("QB", "passing_yards", "attempts", 15), ("RB", "rushing_yards", "carries", 5),
+              ("RB", "receiving_yards", "targets", 2), ("WR", "receiving_yards", "targets", 3),
+              ("TE", "receiving_yards", "targets", 2), ("WR", "receptions", "targets", 3),
+              ("RB", "tds", "touches", 6), ("WR", "tds", "targets", 3), ("TE", "tds", "targets", 2)]
+done_rows = pp[~pp.upcoming]
+matchups = {}
+for pos_, st_, use_, mn_ in MATCH_KEYS:
+    d_ = done_rows[(done_rows.position == pos_) & (done_rows[f"p_{use_}"] >= mn_) &
+                   done_rows[st_].notna() & done_rows[f"p_{st_}"].notna()]
+    d_ = d_.assign(diff=d_[st_] - d_[f"p_{st_}"])
+    per_game = (d_.groupby(["opponent_team", "game_id", "season", "week"])["diff"].sum()
+                  .reset_index().sort_values(["season", "week"]))
+    recent_g = per_game.groupby("opponent_team").tail(8)          # each defense's last 8 games
+    ag = recent_g.groupby("opponent_team")["diff"].agg(["size", "mean", lambda x: int((x > 0).sum())])
+    ag.columns = ["n", "avg", "over"]
+    ag = ag[ag.index.isin(TEAMS)]
+    ag["rank"] = ag["avg"].rank(ascending=False, method="min")    # 1 = gives up the most
+    for t_, r_ in ag.iterrows():
+        matchups.setdefault(t_, {})[f"{pos_}|{st_}"] = [round(float(r_["avg"]), 2 if st_ == "tds" else 1),
+                                                        int(r_["over"]), int(r_["n"]), int(r_["rank"])]
+
 # ---------------------------- Trivia ----------------------------
 tr_rng = np.random.default_rng(int(pd.Timestamp.now().strftime("%Y%m%d")))
 ros_c = roster_cur.drop_duplicates("gsis_id").set_index("gsis_id")
@@ -1182,7 +1207,7 @@ data = dict(season=CURRENT_SEASON, updated=pd.Timestamp.now(tz="America/New_York
             props=props, past=past_props, fantasy=fantasy, total_std=round(TOTAL_STD, 2),
             playoffs=playoffs, hfa=round(HFA, 2), sims=N, trivia=dict(guess=guess, quiz=quiz),
             colors={t: [txt(r.team_color), txt(r.team_color2)] for t, r in tinfo.iterrows()},
-            assistant_url=ASSISTANT_URL,
+            assistant_url=ASSISTANT_URL, matchups=matchups,
             prop_meta=dict(week=pwk, calib=calib, report=prop_report, has_book=bool(book)),
             reports=dict(game=game_report, fantasy=fant_report, fantasy_season=fant_season))
 data_json = json.dumps(data, default=lambda o: None if pd.isna(o) else (o.item() if hasattr(o, "item") else str(o)))
@@ -1340,7 +1365,9 @@ h2.sub{font-size:30px;margin:34px 0 4px}
 .qopts button.wrong{border-color:var(--loss);color:var(--loss)}
 .qprog{color:var(--muted);font-size:14px}
 .tq{font:600 24px/1.25 "Big Shoulders Display","Arial Narrow",sans-serif;margin:6px 0 0}
-.subtabs{display:inline-flex;margin:18px 0 0;border:1px solid var(--line);border-radius:4px;overflow:hidden;background:var(--panel)}
+.subtabs{display:flex;width:max-content;max-width:100%;margin:18px 0 0;border:1px solid var(--line);border-radius:4px;overflow-x:auto;scrollbar-width:none;background:var(--panel)}
+.subtabs::-webkit-scrollbar{display:none}
+.subtabs button{flex:0 0 auto;white-space:nowrap}
 .subtabs button{font:600 15px/1 "Archivo",system-ui,sans-serif;border:0;border-left:1px solid var(--line);background:transparent;color:var(--muted);padding:10px 16px;cursor:pointer}
 .subtabs button:first-child{border-left:0}
 .subtabs button[aria-selected="true"]{background:var(--navy);color:#fff}
@@ -1423,6 +1450,48 @@ a.plink:hover{border-bottom-color:var(--turf)}
 .ask-actions .btn{padding:7px 14px;font-size:14px}
 @media (max-width:560px){.ask-panel{right:0;left:0;width:auto;bottom:0;height:calc(100% - 40px);border-radius:8px 8px 0 0;padding-bottom:env(safe-area-inset-bottom,0px)}
   .ask-fab.on{display:none}}
+.bet-dlg{border:1px solid var(--line);border-top:4px solid var(--navy);border-radius:6px;padding:18px 20px;width:min(460px,calc(100vw - 24px));background:var(--panel);color:var(--ink)}
+.bet-dlg::backdrop{background:rgba(19,33,60,.45)}
+.bet-dlg h3{font-size:26px;margin:0 0 10px}
+.bet-desc{font-weight:600;margin:0 0 4px}
+.fld{display:flex;flex-direction:column;gap:4px;font-size:13.5px;color:var(--muted);margin:0 0 10px;flex:1}
+.fld input,.fld select{font:inherit;font-size:16px;color:var(--ink);padding:8px 10px;border:1px solid var(--line);border-radius:4px;background:var(--paper)}
+.fld-row{display:flex;gap:10px}
+.bet-err{color:var(--loss);font-size:14px;margin:0 0 8px}
+.dlg-actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:6px}
+.trk{font:600 12.5px/1 "Archivo",system-ui,sans-serif;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:4px;padding:6px 9px;cursor:pointer;white-space:nowrap}
+.trk:hover{border-color:var(--navy)}
+.trk-row{display:flex;flex-wrap:wrap;gap:6px;margin:16px 0 0}
+.trk-row h4{width:100%}
+.bet-list td,.bet-list th{padding:8px 10px;vertical-align:top}
+.bet-list td.desc{text-align:left;white-space:normal;min-width:200px}
+.bet-list td.desc small{display:block;color:var(--muted)}
+.st{display:inline-block;font:700 12px/1 "Archivo",system-ui,sans-serif;padding:4px 7px;border-radius:3px}
+.st.W{background:var(--turf-soft);color:var(--turf)} .st.L{background:rgba(180,35,24,.1);color:var(--loss)} .st.P{background:var(--faint);color:var(--muted)} .st.open{background:rgba(242,106,33,.12);color:var(--brass)}
+.mini{font:inherit;font-size:12.5px;border:1px solid var(--line);background:none;color:var(--ink);border-radius:4px;padding:3px 7px;cursor:pointer;margin:2px 2px 0 0}
+.slip{max-width:760px}
+.slip-leg{display:grid;grid-template-columns:minmax(0,1fr) 90px 90px 30px;gap:10px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line)}
+.slip-leg input{font:inherit;width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:4px;background:var(--panel);color:var(--ink);text-align:right}
+.warn{border-left:3px solid var(--brass);padding:6px 12px;background:var(--faint);font-size:14px;margin:10px 0}
+a.tlink{color:inherit;text-decoration:none;border-bottom:1px solid var(--line);cursor:pointer}
+a.tlink:hover{border-bottom-color:var(--pylon)}
+.seed{font:700 16px "Big Shoulders Display","Arial Narrow",sans-serif;color:var(--muted);width:26px;display:inline-block}
+.recap-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px;margin-top:12px}
+.recap-card{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:14px 16px}
+.recap-card h3{font-size:22px;margin:0 0 8px}
+.recap-card ul{margin:0;padding-left:18px}.recap-card li{margin:5px 0}
+#toast{position:fixed;left:50%;bottom:calc(84px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--navy);color:#fff;padding:10px 16px;border-radius:4px;font-size:14.5px;opacity:0;pointer-events:none;transition:opacity .2s;z-index:30;max-width:calc(100vw - 32px)}
+#toast.show{opacity:1}
+.season-wrap th:first-child,.season-wrap td:first-child{background:var(--paper)}
+.panel .season-wrap th:first-child,.panel .season-wrap td:first-child{background:var(--panel)}
+.best-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px}
+.picks{list-style:none;padding:0;margin:0}
+.picks li{padding:9px 0;border-bottom:1px solid var(--faint)}
+.picks li:last-child{border-bottom:0}
+.picks li small{display:block;color:var(--muted);font-size:13.5px;margin-top:3px}
+.picks.cols{columns:2 300px;column-gap:24px}
+.picks.cols li{break-inside:avoid}
+.edge-tag{float:right;font:700 16px/1.2 "Big Shoulders Display","Arial Narrow",sans-serif;color:var(--turf);margin-left:10px}
 .props-intro{max-width:72ch;color:var(--muted);font-size:15px;margin:18px 0 0}
 .chk{cursor:pointer}
 .chk input{accent-color:var(--turf);width:16px;height:16px}
@@ -1485,22 +1554,41 @@ a.plink:hover{border-bottom-color:var(--turf)}
 </div>
 
 <nav class="views" role="tablist">
-  <button role="tab" aria-selected="true" data-view="week">Games &amp; players</button>
-  <button role="tab" aria-selected="false" data-view="props">Player props</button>
+  <button role="tab" aria-selected="true" data-view="week">Games</button>
+  <button role="tab" aria-selected="false" data-view="props">Betting</button>
   <button role="tab" aria-selected="false" data-view="fantasy">Fantasy</button>
-  <button role="tab" aria-selected="false" data-view="playoffs">Playoff odds</button>
-  <button role="tab" aria-selected="false" data-view="results">Results</button>
+  <button role="tab" aria-selected="false" data-view="league">League</button>
+  <button role="tab" aria-selected="false" data-view="results">Model record</button>
   <button role="tab" aria-selected="false" data-view="trivia">Trivia</button>
-  <button role="tab" aria-selected="false" data-view="season">Season lines</button>
 </nav>
 
 <section id="view-week">
-  <div class="weeks" id="weeks" role="group" aria-label="Choose week"></div>
+  <nav class="subtabs" role="tablist" aria-label="Games views">
+    <button role="tab" aria-selected="true" data-gsub="wk">This week</button>
+    <button role="tab" aria-selected="false" data-gsub="sched">Full schedule</button>
+  </nav>
+  <div id="gsub-wk">
+  <div class="weeks" id="weeks" role="group" aria-label="Choose week" style="margin-top:12px"></div>
   <p class="empty">Tap a game to see both teams' form and every offensive skill player's advanced stats.</p>
   <div id="games"></div>
+  </div>
+  <div id="gsub-sched" hidden>
+  <div class="toolbar">
+    <label>Team <select id="teamSel"><option value="">All teams</option></select></label>
+    <label>Show <select id="showSel"><option value="all">All games</option><option value="done">Finished</option><option value="up">Upcoming</option></select></label>
+  </div>
+  <p class="teamrec" id="teamrec"></p>
+  <div class="season-wrap"><table class="season" id="seasonTbl"></table></div>
+  </div>
 </section>
 
 <section id="view-props" hidden>
+  <nav class="subtabs" role="tablist" aria-label="Betting views">
+    <button role="tab" aria-selected="true" data-psb="best">Best bets</button>
+    <button role="tab" aria-selected="false" data-psb="all">All player props</button>
+  </nav>
+  <div id="psb-best"></div>
+  <div id="psb-all" hidden>
   <p class="props-intro" id="propsIntro"></p>
   <div id="playerCard"></div>
   <div class="toolbar">
@@ -1511,6 +1599,7 @@ a.plink:hover{border-bottom-color:var(--turf)}
   </div>
   <div class="season-wrap"><table class="props" id="propsTbl"></table></div>
   <div class="prop-notes" id="propNotes"></div>
+  </div>
 </section>
 
 <section id="view-fantasy" hidden>
@@ -1571,14 +1660,6 @@ a.plink:hover{border-bottom-color:var(--turf)}
   <div class="season-wrap"><table id="projAcc"></table></div>
 </section>
 
-<section id="view-playoffs" hidden>
-  <nav class="subtabs" role="tablist" aria-label="Playoff views">
-    <button role="tab" aria-selected="true" data-psub="odds">Playoff odds</button>
-    <button role="tab" aria-selected="false" data-psub="power">Power rankings</button>
-  </nav>
-  <p class="lede" id="poLede" style="margin-top:14px"></p>
-  <div id="poOut"></div>
-</section>
 
 <section id="view-trivia" hidden>
   <div class="chalk-wrap"><svg class="chalk" viewBox="0 0 720 150" role="img" aria-label="Chalkboard play diagram">
@@ -1607,16 +1688,33 @@ a.plink:hover{border-bottom-color:var(--turf)}
   <datalist id="allNames"></datalist>
 </section>
 
+
+<section id="view-league" hidden>
+  <nav class="subtabs" role="tablist" aria-label="League views">
+    <button role="tab" aria-selected="true" data-lsub="stand">Standings</button>
+    <button role="tab" aria-selected="false" data-lsub="odds">Playoff odds</button>
+    <button role="tab" aria-selected="false" data-lsub="power">Power rankings</button>
+    <button role="tab" aria-selected="false" data-lsub="leaders">Stat leaders</button>
+    <button role="tab" aria-selected="false" data-lsub="recap">Weekly recap</button>
+  </nav>
+  <div id="lsub-stand" class="lsub"></div>
+  <div id="lsub-po" class="lsub" hidden><p class="lede" id="poLede" style="margin-top:14px"></p><div id="poOut"></div></div>
+  <div id="lsub-leaders" class="lsub" hidden>
+    <div class="toolbar" style="margin-top:14px">
+      <label>Position <select id="ldPos"><option>QB</option><option>RB</option><option selected>WR</option><option>TE</option></select></label>
+      <label>Stat <select id="ldStat"></select></label>
+      <label>Minimum games <select id="ldMin"><option>1</option><option selected>2</option><option>4</option><option>6</option><option>8</option></select></label>
+    </div>
+    <div class="season-wrap"><table id="ldTbl" class="po"></table></div>
+  </div>
+  <div id="lsub-recap" class="lsub" hidden></div>
+</section>
+
+<section id="view-team" hidden><div id="teamView"></div></section>
+
+
 <section id="view-player" hidden><div id="playerView"></div></section>
 
-<section id="view-season" hidden>
-  <div class="toolbar">
-    <label>Team <select id="teamSel"><option value="">All teams</option></select></label>
-    <label>Show <select id="showSel"><option value="all">All games</option><option value="done">Finished</option><option value="up">Upcoming</option></select></label>
-  </div>
-  <p class="teamrec" id="teamrec"></p>
-  <div class="season-wrap"><table class="season" id="seasonTbl"></table></div>
-</section>
 
 <section class="gloss">
   <h2>What the numbers mean</h2>
@@ -1689,7 +1787,8 @@ $("#glossNote").textContent = `Tested on ${GR.seasons} games it never saw, the g
 // views
 function showView(v){
   document.querySelectorAll("nav.views button").forEach(o => o.setAttribute("aria-selected", o.dataset.view===v));
-  ["week","season","props","fantasy","results","player","playoffs","trivia"].forEach(x => $("#view-"+x).hidden = x !== v);
+  ["week","props","fantasy","results","player","trivia","league","team"].forEach(x => $("#view-"+x).hidden = x !== v);
+  if (v==="league" && typeof renderLeague==="function") renderLeague();
 }
 document.querySelectorAll("nav.views button").forEach(b => b.onclick = () => showView(b.dataset.view));
 
@@ -1996,7 +2095,7 @@ function searchFor(q){
 function drawHits(){
   const ul = $("#qres");
   if (!$("#q").value.trim()){ ul.hidden = true; $("#q").setAttribute("aria-expanded","false"); return; }
-  ul.innerHTML = hits.length ? hits.map((h,i)=>`<li role="option" id="opt${i}" aria-selected="${i===hi}" data-i="${i}"><span>${h.type==="t"?teamBadge(h.tm):teamBadge(h.tm)}${h.n}</span><small>${h.type==="t"?"Team, see schedule and lines":h.pos}</small></li>`).join("")
+  ul.innerHTML = hits.length ? hits.map((h,i)=>`<li role="option" id="opt${i}" aria-selected="${i===hi}" data-i="${i}"><span>${h.type==="t"?teamBadge(h.tm):teamBadge(h.tm)}${h.n}</span><small>${h.type==="t"?"Team page":h.pos}</small></li>`).join("")
                              : `<li class="none">No players or teams match</li>`;
   ul.hidden = false; $("#q").setAttribute("aria-expanded","true");
   $("#q").setAttribute("aria-activedescendant", hi>=0 ? "opt"+hi : "");
@@ -2005,7 +2104,7 @@ function drawHits(){
 function choose(h){
   $("#qres").hidden = true; $("#q").setAttribute("aria-expanded","false"); $("#q").value = h.n;
   if (h.type==="t"){
-    showView("season"); $("#teamSel").value = h.tm; $("#showSel").value = "all"; renderSeason();
+    openTeam(h.tm);
   } else {
     openPlayer(h.n);
   }
@@ -2179,7 +2278,7 @@ function renderPropResults(){
   const tile = (v, lbl) => `<div class="tile"><span class="cond">${v}</span><small>${lbl}</small></div>`;
   if (!picks.length){
     $("#pTiles").innerHTML = ""; $("#pByStat").innerHTML = ""; 
-    $("#pList").innerHTML = `<tbody><tr><td>${src==="book" ? "No graded picks yet. Once the site pulls sportsbook lines (with an Odds API key), every pick with an edge gets graded here after the games." : "No graded picks yet. Lines you type in on the Player props tab are graded here after the games, as long as you use the same browser."}</td></tr></tbody>`;
+    $("#pList").innerHTML = `<tbody><tr><td>${src==="book" ? "No graded picks yet. Once the site pulls sportsbook lines (with an Odds API key), every pick with an edge gets graded here after the games." : "No graded picks yet. Lines you type in on the Betting tab are graded here after the games, as long as you use the same browser."}</td></tr></tbody>`;
     return;
   }
   $("#pTiles").innerHTML = tile(`${t.w}-${t.l}${t.p?"-"+t.p:""}`, `Record, ${pct([t.w,t.l])}`) +
@@ -2324,7 +2423,6 @@ const POD = D.playoffs || [];
 let poSub = "odds";
 function pctCell(v){ return `<td><span class="pct">${v==null?"–":(v>=99.95?">99.9":v<0.05&&v>0?"<0.1":v.toFixed(1))+"%"}<i style="width:${Math.min(100,v||0)}%"></i></span></td>`; }
 function renderPlayoffs(){
-  document.querySelectorAll("[data-psub]").forEach(b=>b.setAttribute("aria-selected", b.dataset.psub===poSub));
   if (!POD.length){ $("#poOut").innerHTML = ""; return; }
   $("#poLede").textContent = poSub==="odds"
     ? `Based on ${D.sims.toLocaleString()} simulations of the rest of the season, using the model's prediction for every remaining game. Updated with every build. Tiebreakers are simplified (point differential), so close races can differ slightly from the real rules.`
@@ -2333,7 +2431,7 @@ function renderPlayoffs(){
   if (poSub==="power"){
     const L = [...POD].sort((a,b)=>b.rating-a.rating);
     $("#poOut").innerHTML = `<div class="season-wrap"><table class="po"><thead><tr><th>#</th><th style="text-align:left">Team</th><th>Rating</th><th>Record</th><th>Projected wins</th><th>Win Super Bowl</th></tr></thead><tbody>` +
-      L.map((t,i)=>`<tr><td>${i+1}</td><td style="text-align:left"><span class="swatch" style="background:${tcol(t.t)}"></span>${t.name}</td><td class="${t.rating>=3?'hot':t.rating<=-3?'cold':''}">${t.rating>0?"+":""}${t.rating.toFixed(1)}</td><td>${rec(t)}</td><td>${t.pw.toFixed(1)}</td>${pctCell(t.sb)}</tr>`).join("") + `</tbody></table></div>`;
+      L.map((t,i)=>`<tr><td>${i+1}</td><td style="text-align:left"><span class="swatch" style="background:${tcol(t.t)}"></span>${tlink(t.t)}</td><td class="${t.rating>=3?'hot':t.rating<=-3?'cold':''}">${t.rating>0?"+":""}${t.rating.toFixed(1)}</td><td>${rec(t)}</td><td>${t.pw.toFixed(1)}</td>${pctCell(t.sb)}</tr>`).join("") + `</tbody></table></div>`;
     return;
   }
   let html = "";
@@ -2343,14 +2441,13 @@ function renderPlayoffs(){
     for (const d of divs){
       html += `<tr class="divrow"><td colspan="8">${d}</td></tr>`;
       POD.filter(t=>t.div===d).sort((a,b)=>b.playoffs-a.playoffs).forEach(t=>{
-        html += `<tr><td style="text-align:left"><span class="swatch" style="background:${tcol(t.t)}"></span>${t.name}</td><td>${rec(t)}</td><td>${t.pw.toFixed(1)}</td>${pctCell(t.playoffs)}${pctCell(t.division)}${pctCell(t.bye)}${pctCell(t.cchamp)}${pctCell(t.sb)}</tr>`;
+        html += `<tr><td style="text-align:left"><span class="swatch" style="background:${tcol(t.t)}"></span>${tlink(t.t)}</td><td>${rec(t)}</td><td>${t.pw.toFixed(1)}</td>${pctCell(t.playoffs)}${pctCell(t.division)}${pctCell(t.bye)}${pctCell(t.cchamp)}${pctCell(t.sb)}</tr>`;
       });
     }
     html += `</tbody></table></div>`;
   }
   $("#poOut").innerHTML = html;
 }
-document.querySelectorAll("[data-psub]").forEach(b=>b.onclick=()=>{ poSub=b.dataset.psub; renderPlayoffs(); });
 renderPlayoffs();
 
 // ---------- trivia ----------
@@ -2415,6 +2512,206 @@ function renderQuiz(){
 }
 newQuiz();
 
+// ================= Shared: teams =================
+const GAME = {}; D.games.forEach(g => GAME[g.id] = g);
+function ncdf(x){ const t=1/(1+.2316419*Math.abs(x)), d=.3989423*Math.exp(-x*x/2); const p=d*t*(.3193815+t*(-.3565638+t*(1.781478+t*(-1.821256+t*1.330274)))); return x>0?1-p:p; }
+const TEAMINFO = Object.fromEntries((D.playoffs||[]).map(t=>[t.t,t]));
+function tlink(t){ return `<a class="tlink" data-t="${t}">${TNAME[t]||t}</a>`; }
+document.addEventListener("click", e => { const a = e.target.closest && e.target.closest("a.tlink"); if (a){ e.preventDefault(); openTeam(a.dataset.t); } });
+// ================= League =================
+let lsub = "stand";
+document.querySelectorAll("[data-lsub]").forEach(b=>b.onclick=()=>{ lsub=b.dataset.lsub; renderLeague(); });
+function standings(){
+  const T = {}; (D.playoffs||[]).forEach(t=>T[t.t] = {t:t.t, name:t.name, conf:t.conf, div:t.div, w:0,l:0,ti:0,pf:0,pa:0,dw:0,dl:0,cw:0,cl:0,res:[]});
+  D.games.filter(done).sort((a,b)=>a.wk-b.wk).forEach(g=>{
+    const H = T[g.home], A = T[g.away]; if (!H||!A) return;
+    H.pf+=g.hs; H.pa+=g.as_; A.pf+=g.as_; A.pa+=g.hs;
+    const r = g.hs>g.as_ ? 1 : g.hs<g.as_ ? -1 : 0;
+    [[H,r],[A,-r]].forEach(([X,v])=>{ if (v>0) X.w++; else if (v<0) X.l++; else X.ti++; X.res.push(v);
+      const O = X===H?A:H; if (O.div===X.div){ if(v>0)X.dw++; else if(v<0)X.dl++; } if (O.conf===X.conf){ if(v>0)X.cw++; else if(v<0)X.cl++; } });
+  });
+  Object.values(T).forEach(x=>{ x.pct = (x.w + x.ti/2)/Math.max(1,x.w+x.l+x.ti); x.diff = x.pf-x.pa;
+    let s = 0, v = x.res[x.res.length-1]; for (let i=x.res.length-1;i>=0 && x.res[i]===v;i--) s++; x.streak = x.res.length ? (v>0?"W":v<0?"L":"T")+s : "–"; });
+  return T;
+}
+const byRank = (a,b) => b.pct-a.pct || (b.dw-b.dl)-(a.dw-a.dl) || b.diff-a.diff;
+function renderLeague(){
+  document.querySelectorAll("[data-lsub]").forEach(b=>b.setAttribute("aria-selected", b.dataset.lsub===lsub));
+  ["stand","leaders","recap"].forEach(k=>$("#lsub-"+k).hidden = k!==lsub);
+  $("#lsub-po").hidden = !(lsub==="odds" || lsub==="power");
+  if (lsub==="stand") renderStandings(); else if (lsub==="leaders") renderLeaders(); else if (lsub==="recap") renderRecap();
+  else { poSub = lsub; renderPlayoffs(); }
+}
+function renderStandings(){
+  const T = standings(), rec = x => `${x.w}-${x.l}${x.ti?"-"+x.ti:""}`;
+  let h = `<p class="lede" style="margin-top:14px">Current standings, with the playoff picture if the season ended today. Tiebreakers are simplified (win percentage, then division record, then point differential), so some close races may be ordered differently than the NFL's official rules.</p>`;
+  for (const c of ["AFC","NFC"]){
+    const teams = Object.values(T).filter(x=>x.conf===c), divs = [...new Set(teams.map(x=>x.div))].sort();
+    const leaders = divs.map(d=>teams.filter(x=>x.div===d).sort(byRank)[0]).sort(byRank);
+    const rest = teams.filter(x=>!leaders.includes(x)).sort(byRank);
+    const seeds = [...leaders, ...rest.slice(0,3)];
+    h += `<h2 class="sub">${c} playoff picture</h2><div class="season-wrap"><table class="po"><tbody>` +
+      seeds.map((x,i)=>`<tr><td style="text-align:left"><span class="seed">${i+1}</span><span class="swatch" style="background:${tcol(x.t)}"></span>${tlink(x.t)}</td><td>${rec(x)}</td><td style="text-align:left;color:var(--muted)">${i<4?(i===0?"Division leader, first-round bye":"Division leader"):"Wild card"}</td></tr>`).join("") +
+      rest.slice(3,5).map(x=>`<tr><td style="text-align:left"><span class="seed"></span><span class="swatch" style="background:${tcol(x.t)}"></span>${tlink(x.t)}</td><td>${rec(x)}</td><td style="text-align:left;color:var(--muted)">In the hunt</td></tr>`).join("") + `</tbody></table></div>`;
+    h += `<div class="season-wrap"><table class="po"><thead><tr><th style="text-align:left">Team</th><th>W-L</th><th>Pct</th><th>PF</th><th>PA</th><th>Diff</th><th>Div</th><th>Conf</th><th>Streak</th></tr></thead><tbody>`;
+    for (const d of divs){
+      h += `<tr class="divrow"><td colspan="9">${d}</td></tr>` + teams.filter(x=>x.div===d).sort(byRank).map(x=>`<tr><td style="text-align:left"><span class="swatch" style="background:${tcol(x.t)}"></span>${tlink(x.t)}</td><td>${rec(x)}</td><td>${x.pct.toFixed(3).replace(/^0/,"")}</td><td>${x.pf}</td><td>${x.pa}</td><td class="${x.diff>0?'hot':x.diff<0?'cold':''}">${x.diff>0?"+":""}${x.diff}</td><td>${x.dw}-${x.dl}</td><td>${x.cw}-${x.cl}</td><td>${x.streak}</td></tr>`).join("");
+    }
+    h += `</tbody></table></div>`;
+  }
+  $("#lsub-stand").innerHTML = h;
+}
+function ldOptions(){ const cols = COLS[$("#ldPos").value].filter(c=>c[1]!=="gp"); $("#ldStat").innerHTML = cols.map(c=>`<option value="${c[1]}" ${c[1]==="ppg"?"selected":""}>${c[0]}</option>`).join(""); }
+ldOptions(); $("#ldPos").onchange = () => { ldOptions(); renderLeaders(); }; $("#ldStat").onchange = renderLeaders; $("#ldMin").onchange = renderLeaders;
+function renderLeaders(){
+  const pos = $("#ldPos").value, k = $("#ldStat").value, mn = +$("#ldMin").value, cols = COLS[pos];
+  const low = ["int_"].includes(k);   // fewer is better
+  const L = D.players.filter(p=>p.pos===pos && p.gp>=mn && p[k]!=null).sort((a,b)=>low ? a[k]-b[k] : b[k]-a[k]).slice(0,40);
+  $("#ldTbl").innerHTML = `<thead><tr><th>#</th><th style="text-align:left">Player</th>${cols.map(c=>`<th ${c[1]===k?'aria-sort="descending"':""}>${c[0]}</th>`).join("")}</tr></thead><tbody>` +
+    L.map((p,i)=>`<tr><td>${i+1}</td><td style="text-align:left">${teamBadge(p.tm)}${plink(p.n)}</td>${cols.map(c=>{ const v=p[c[1]]; return `<td class="${c[1]===k?'hot':''}">${fmt(v,c[2])}</td>`; }).join("")}</tr>`).join("") + `</tbody>`;
+  wireLinks($("#ldTbl"));
+}
+let recapWk = null;
+function renderRecap(){
+  const wks = [...new Set(D.games.filter(done).map(g=>g.wk))].sort((a,b)=>a-b);
+  if (!wks.length){ $("#lsub-recap").innerHTML = `<p class="empty">The recap appears after the first week of games.</p>`; return; }
+  if (!recapWk || !wks.includes(recapWk)){ const full = wks.filter(w=>D.games.filter(g=>g.wk===w).every(done)); recapWk = full.length ? full[full.length-1] : wks[wks.length-1]; }
+  const G = D.games.filter(g=>g.wk===recapWk && done(g)), R = gradeGames(G);
+  const judged = G.filter(g=>g.spread!=null && g.pred!=null && (g.hs-g.as_)!==g.spread).map(g=>{ const m = g.hs-g.as_, ok = (g.pred>g.spread)===(m>g.spread); return {g, ok, edge:Math.abs(g.pred-g.spread)}; });
+  const best = judged.filter(x=>x.ok).sort((a,b)=>b.edge-a.edge).slice(0,2), worst = judged.filter(x=>!x.ok).sort((a,b)=>b.edge-a.edge).slice(0,2);
+  const pickTxt = x => `${x.g.away} at ${x.g.home}: the model took ${x.g.pred>x.g.spread?x.g.home:x.g.away} against a ${spreadTxt(x.g,x.g.spread)} line (${x.edge.toFixed(1)}-point edge). Final: ${x.g.away} ${x.g.as_}, ${x.g.home} ${x.g.hs}.`;
+  const upsets = G.filter(g=>g.spread!=null && g.spread!==0 && ((g.spread>0) !== (g.hs>g.as_)) && g.hs!==g.as_).sort((a,b)=>Math.abs(b.spread)-Math.abs(a.spread)).slice(0,4);
+  const perf = []; Object.entries(D.logs||{}).forEach(([n,lg])=>{ const x = lg.find(r=>r[0]===D.season && r[1]===recapWk); if (x && x[16]!=null) perf.push({n, x, tm:(people.get(n)||{}).tm}); });
+  perf.sort((a,b)=>b.x[16]-a.x[16]);
+  const line = x => { const p=[]; if (x[4]) p.push(`${x[5]}/${x[4]}, ${x[6]} pass yds, ${x[7]} TD`); if (x[9]) p.push(`${x[9]} car, ${x[10]} yds${x[11]?`, ${x[11]} TD`:""}`); if (x[12]) p.push(`${x[13]} rec, ${x[14]} yds${x[15]?`, ${x[15]} TD`:""}`); return p.join("; "); };
+  const surpr = (D.past||[]).filter(r=>r.wk===recapWk && r.qs && ["rushing_yards","receiving_yards","passing_yards"].includes(r.st)).map(r=>({r, d:r.act-r.qs[2]}));
+  const up = surpr.sort((a,b)=>b.d-a.d).slice(0,4), down = [...surpr].sort((a,b)=>a.d-b.d).slice(0,3);
+  let h = `<div class="toolbar" style="margin-top:14px"><label>Week <select id="rcWk">${wks.map(w=>`<option ${w===recapWk?"selected":""}>${w}</option>`).join("")}</select></label></div>
+    <div class="recap-grid">
+    <div class="recap-card"><h3>How the model did</h3><ul><li>Winners: ${wl(R.su)}</li><li>Against the spread: ${wl(R.ats)} (3+ point edges: ${wl(R.ats3)})</li><li>Totals: ${wl(R.ou)}</li></ul></div>
+    <div class="recap-card"><h3>Best calls</h3>${best.length?`<ul>${best.map(x=>`<li>${pickTxt(x)}</li>`).join("")}</ul>`:`<p class="empty">No winning picks this week.</p>`}</div>
+    <div class="recap-card"><h3>Worst calls</h3>${worst.length?`<ul>${worst.map(x=>`<li>${pickTxt(x)}</li>`).join("")}</ul>`:`<p class="empty">No losing picks this week.</p>`}</div>
+    <div class="recap-card"><h3>Upsets</h3>${upsets.length?`<ul>${upsets.map(g=>{ const dog = g.spread>0?g.away:g.home; return `<li>${dog} won as a ${Math.abs(g.spread)}-point underdog, ${g.away} ${g.as_}, ${g.home} ${g.hs}.</li>`; }).join("")}</ul>`:`<p class="empty">Every favorite won.</p>`}</div>
+    <div class="recap-card"><h3>Top fantasy performances</h3><ul>${perf.slice(0,6).map(p=>`<li>${teamBadge(p.tm)}${plink(p.n)}: ${p.x[16].toFixed(1)} PPR. ${line(p.x)}.</li>`).join("")}</ul></div>
+    <div class="recap-card"><h3>Biggest surprises</h3><ul>${up.map(x=>`<li>${plink(x.r.n)}: ${Math.round(x.r.act)} ${STATL[x.r.st].toLowerCase()}, projected ${Math.round(x.r.qs[2])}.</li>`).join("")}${down.map(x=>`<li>${plink(x.r.n)}: ${Math.round(x.r.act)} ${STATL[x.r.st].toLowerCase()}, projected ${Math.round(x.r.qs[2])}.</li>`).join("")}</ul></div>
+    </div>`;
+  $("#lsub-recap").innerHTML = h; wireLinks($("#lsub-recap"));
+  $("#rcWk").onchange = e => { recapWk = +e.target.value; renderRecap(); };
+}
+// ================= Team pages =================
+function openTeam(t){ if (!TNAME[t]) return; renderTeam(t); showView("team"); window.scrollTo({top: $("nav.views").getBoundingClientRect().top + window.scrollY - 12}); }
+function renderTeam(t){
+  const T = standings()[t], P = TEAMINFO[t] || {}, games = D.games.filter(g=>g.home===t||g.away===t).sort((a,b)=>a.wk-b.wk);
+  const tile = (v, lbl) => `<div class="tile"><span class="cond">${v}</span><small>${lbl}</small></div>`;
+  let ats = [0,0,0]; games.filter(done).forEach(g=>{ if (g.spread==null) return; const m = (g.hs-g.as_)*(g.home===t?1:-1), s = g.spread*(g.home===t?1:-1); if (m>s) ats[0]++; else if (m<s) ats[1]++; else ats[2]++; });
+  let h = `<div class="pv-head"><div><h2>${teamChip(t)}${TNAME[t]}</h2><p class="who">${P.div||""}. ${T?`${T.w}-${T.l}${T.ti?"-"+T.ti:""}, ${wl(ats)} against the spread`:""}</p></div></div>
+    <div class="tiles" style="margin-top:14px">${tile(P.rating!=null?(P.rating>0?"+":"")+P.rating.toFixed(1):"–","Power rating (pts vs average team)")}${tile(P.pw!=null?P.pw.toFixed(1):"–","Projected wins")}${tile(P.playoffs!=null?P.playoffs.toFixed(0)+"%":"–","Chance to make playoffs")}${tile(P.sb!=null?P.sb.toFixed(1)+"%":"–","Chance to win Super Bowl")}</div>`;
+  h += `<div class="panel" style="margin-top:14px">${formPanel(t)}</div>`;
+  h += `<h2 class="sub">Schedule</h2><div class="season-wrap"><table class="po"><thead><tr><th>Wk</th><th style="text-align:left">Opponent</th><th>Vegas</th><th>Model</th><th style="text-align:left">Result</th></tr></thead><tbody>` +
+    games.map(g=>{ const home = g.home===t, opp = home?g.away:g.home;
+      let res = done(g) ? (()=>{ const m=(g.hs-g.as_)*(home?1:-1); return `${m>0?"W":m<0?"L":"T"} ${home?g.hs:g.as_}-${home?g.as_:g.hs}`; })() : `<span class="qprog">${timeTxt(g)}</span>`;
+      return `<tr><td>${g.wk}</td><td style="text-align:left">${home?"vs":"at"} <span class="swatch" style="background:${tcol(opp)}"></span>${tlink(opp)}</td><td>${spreadTxt(g,g.spread)}</td><td>${spreadTxt(g,g.pred)}</td><td style="text-align:left">${res}</td></tr>`; }).join("") + `</tbody></table></div>`;
+  const key = D.players.filter(p=>p.tm===t).sort((a,b)=>(b.ppg||0)-(a.ppg||0)).slice(0,8);
+  if (key.length) h += `<h2 class="sub">Key players</h2><div class="season-wrap"><table class="po"><thead><tr><th style="text-align:left">Player</th><th>Pos</th><th>Games</th><th>Snap %</th><th>PPR per game</th></tr></thead><tbody>` +
+    key.map(p=>`<tr><td style="text-align:left">${plink(p.n)}</td><td>${p.pos}</td><td>${p.gp}</td><td>${p.snap??"–"}</td><td>${fmt(p.ppg,1)}</td></tr>`).join("") + `</tbody></table></div>`;
+  const nx = games.find(g=>!done(g)); if (nx && nx.outs && nx.outs[t]) h += `<p class="outs" style="margin-top:14px"><b>Ruled out for week ${nx.wk}:</b> ${nx.outs[t].join(", ")}.</p>`;
+  h += `<p style="margin-top:24px"><button class="btn ghost" type="button" id="tvBack">Back to games</button></p>`;
+  $("#teamView").innerHTML = h; wireLinks($("#teamView"));
+  $("#tvBack").onclick = () => { $("#q").value=""; showView("week"); };
+}
+
+// ================= Sub-tabs for Games and Betting =================
+document.querySelectorAll("[data-gsub]").forEach(b=>b.onclick=()=>{
+  document.querySelectorAll("[data-gsub]").forEach(o=>o.setAttribute("aria-selected", o===b));
+  $("#gsub-wk").hidden = b.dataset.gsub!=="wk"; $("#gsub-sched").hidden = b.dataset.gsub!=="sched";
+});
+document.querySelectorAll("[data-psb]").forEach(b=>b.onclick=()=>showPsb(b.dataset.psb));
+function showPsb(k){
+  document.querySelectorAll("[data-psb]").forEach(o=>o.setAttribute("aria-selected", o.dataset.psb===k));
+  $("#psb-best").hidden = k!=="best"; $("#psb-all").hidden = k!=="all";
+}
+
+// ================= Best bets =================
+const MU = D.matchups || {};
+const MU_LABEL = {"QB|passing_yards":["passing yards","QBs"], "RB|rushing_yards":["rushing yards","RBs"], "RB|receiving_yards":["receiving yards","RBs"],
+  "WR|receiving_yards":["receiving yards","WRs"], "TE|receiving_yards":["receiving yards","TEs"], "WR|receptions":["catches","WRs"],
+  "RB|tds":["touchdowns","RBs"], "WR|tds":["touchdowns","WRs"], "TE|tds":["touchdowns","TEs"]};
+const nDef = Object.keys(MU).length || 32;
+function muFor(def, key){ const m = MU[def] && MU[def][key]; return m ? {avg:m[0], over:m[1], n:m[2], rank:m[3]} : null; }
+function muSentence(def, key, m){
+  const [what, who] = MU_LABEL[key], dec = key.endsWith("tds") ? 2 : 0, amt = Math.abs(m.avg).toFixed(dec);
+  const dir = m.avg >= 0 ? "more" : "fewer";
+  const tail = m.avg >= 0 ? `more than usual in ${m.over} of ${m.n}` : `less than usual in ${m.n - m.over} of ${m.n}`;
+  return `${who} average ${amt} ${dir} ${what} per game than usual against the ${TNAME[def]||def} (${tail} games${m.n<5?", small sample":""}).`;
+}
+function streakFor(n, st){
+  const lg = (D.logs[n]||[]).slice(-6); if (lg.length < 4) return null;
+  const idx = {receiving_yards:14, rushing_yards:10, receptions:13, passing_yards:6}[st];
+  if (st==="tds"){ let s = 0; for (let i=lg.length-1;i>=0 && (lg[i][11]+lg[i][15])>0;i--) s++; return s>=3 ? {text:`a touchdown in ${s} straight games`, mark:.5, s} : null; }
+  if (idx==null) return null;
+  const marks = {receiving_yards:[125,100,80,70,60,50], rushing_yards:[125,100,80,70,60,50], receptions:[9,8,7,6,5,4], passing_yards:[325,300,275,250,225]}[st];
+  const need = lg.length>=6 ? 5 : lg.length-1;
+  for (const mk of marks){ const hits = lg.filter(x=>x[idx]>=mk).length; if (hits>=need) return {text:`${mk}+ ${STATL[st].toLowerCase()} in ${hits} of his last ${lg.length}`, mark:mk, hits, of:lg.length}; }
+  return null;
+}
+function renderBest(){
+  const box = $("#psb-best");
+  const wkGames = D.games.filter(g=>g.wk===PM.week && !done(g));
+  const tile = (v, lbl) => `<div class="tile"><span class="cond">${v}</span><small>${lbl}</small></div>`;
+  let h = `<p class="lede" style="margin-top:14px">The strongest bets and trends for week ${PM.week}. Edges compare the model with the sportsbook line. Trends show what's been happening lately; sportsbooks know about matchups too, so treat a trend as a tiebreaker rather than a reason to bet on its own.</p>`;
+  // --- 1. Top picks
+  const gp = [];
+  wkGames.forEach(g=>{
+    if (g.spread!=null && g.pred!=null){ const e = Math.abs(g.pred-g.spread); if (e>=2){ const side = g.pred>g.spread ? g.home : g.away, line = side===g.home ? -g.spread : g.spread;
+      gp.push({e, txt:`${teamBadge(side)}<b>${side} ${line>0?"+":""}${line===0?"pick'em":line}</b>`, sub:`${g.away} at ${g.home}. Model: ${spreadTxt(g,g.pred)}, Vegas: ${spreadTxt(g,g.spread)}.`, pts:`${e.toFixed(1)} pts`}); } }
+    if (g.total!=null && g.tpred!=null){ const e = Math.abs(g.tpred-g.total); if (e>=3) gp.push({e:e*.8, txt:`<b>${g.tpred>g.total?"Over":"Under"} ${g.total}</b>`, sub:`${g.away} at ${g.home}. Model total: ${g.tpred.toFixed(1)}.`, pts:`${e.toFixed(1)} pts`}); }
+  });
+  gp.sort((a,b)=>b.e-a.e);
+  const pp = PR.map(r=>({r, e:evalRow(r)})).filter(x=>x.e.p!=null && x.e.edge>=.04).sort((a,b)=>b.e.edge-a.e.edge).slice(0,10);
+  h += `<h2 class="sub">Top picks</h2><div class="best-grid"><div class="recap-card"><h3>Games</h3>${gp.length ? `<ul class="picks">${gp.slice(0,6).map(x=>`<li>${x.txt}<span class="edge-tag">${x.pts}</span><small>${x.sub}</small></li>`).join("")}</ul>` : `<p class="empty">No big spread or total edges this week.</p>`}</div>
+    <div class="recap-card"><h3>Player props</h3>${pp.length ? `<ul class="picks">${pp.map(({r,e})=>{ const v=e.v, td=r.st==="tds";
+      return `<li>${teamBadge(r.tm)}<b>${plink(r.n)} ${td?"anytime TD":(e.side==="over"?"over ":"under ")+v.line+" "+STATL[r.st].toLowerCase()}</b><span class="edge-tag">+${(e.edge*100).toFixed(1)}%</span><small>${fmtOdds(e.side==="under"?v.under:v.over)}${r.book&&v.fromBook?` at ${r.book}`:""}. Model gives it ${Math.round(e.sideP*100)}%.</small></li>`; }).join("")}</ul>`
+      : `<p class="empty">${PR.some(r=>evalRow(r).p!=null) ? "No props with a 4%+ edge right now." : "Prop picks appear once the site has sportsbook lines, or when you type lines into All player props."}</p>`}</div></div>`;
+  // --- 2. Where they agree
+  const agree = [];
+  PR.forEach(r=>{
+    const e = evalRow(r); if (e.p==null || e.edge<.03) return;
+    const key = r.pos+"|"+r.st, m = muFor(r.opp, key), s = streakFor(r.n, r.st), why = [];
+    const overSide = r.st==="tds" || e.side==="over";
+    if (m && m.n>=4){ if (overSide && m.rank<=8 && m.over/m.n>=.6) why.push(`soft matchup (${m.rank===1?"most":ord(m.rank)+" most"} allowed)`); if (!overSide && m.rank>nDef-8 && (m.n-m.over)/m.n>=.6) why.push(`tough matchup (${nDef-m.rank+1===1?"fewest":ord(nDef-m.rank+1)+" fewest"} allowed)`); }
+    if (s && overSide && (r.st==="tds" || s.mark>=e.v.line)) why.push(s.text);
+    if (why.length) agree.push({r, e, why});
+  });
+  agree.sort((a,b)=>b.why.length-a.why.length || b.e.edge-a.e.edge);
+  h += `<h2 class="sub">Where the model and trends agree</h2><div class="recap-card">${agree.length ? `<ul class="picks">${agree.slice(0,10).map(({r,e,why})=>`<li>${teamBadge(r.tm)}<b>${plink(r.n)} ${r.st==="tds"?"anytime TD":(e.side==="over"?"over ":"under ")+e.v.line+" "+STATL[r.st].toLowerCase()}</b><span class="edge-tag">+${(e.edge*100).toFixed(1)}%</span><small>Model edge, plus ${why.join(" and ")}.</small></li>`).join("")}</ul>`
+    : `<p class="empty">${PR.some(r=>evalRow(r).p!=null) ? "Nothing lines up strongly this week." : "This list fills in once props have sportsbook lines."}</p>`}</div>`;
+  // --- 3. Matchup trends
+  const soft = [], tough = [];
+  wkGames.forEach(g=>[[g.home,g.away],[g.away,g.home]].forEach(([def, off])=>{
+    Object.keys(MU_LABEL).forEach(key=>{
+      const m = muFor(def, key); if (!m || m.n<3) return;
+      const [pos, st] = key.split("|");
+      const players = PR.filter(r=>r.tm===off && r.pos===pos && r.st===st).sort((a,b)=>(b.qs?b.qs[2]:b.mu)-(a.qs?a.qs[2]:a.mu)).slice(0,2);
+      if (!players.length) return;
+      const item = {def, off, key, m, players};
+      if (m.rank<=4) soft.push(item); else if (m.rank>nDef-4) tough.push(item);
+    });
+  }));
+  const muItem = x => `<li>${teamBadge(x.def)}<b>${MU_LABEL[x.key][1]} vs the ${TNAME[x.def]}</b><small>${muSentence(x.def, x.key, x.m)} This week: ${x.players.map(r=>`${plink(r.n)} (${r.qs?`projected ${x.key.endsWith("receptions")?r.qs[2].toFixed(1):Math.round(r.qs[2])}`:`${Math.round(probOver(r,.5)*100)}% TD`})`).join(", ")}.</small></li>`;
+  soft.sort((a,b)=>a.m.rank-b.m.rank || b.m.over/b.m.n-a.m.over/a.m.n); tough.sort((a,b)=>b.m.rank-a.m.rank);
+  h += `<h2 class="sub">Matchup trends</h2><p class="lede">How players at each position have done against this week's opponents over each defense's last 8 games, compared with what those same players usually do.</p>
+    <div class="best-grid"><div class="recap-card"><h3>Softest matchups</h3>${soft.length?`<ul class="picks">${soft.slice(0,8).map(muItem).join("")}</ul>`:`<p class="empty">No standout soft matchups.</p>`}</div>
+    <div class="recap-card"><h3>Toughest matchups</h3>${tough.length?`<ul class="picks">${tough.slice(0,6).map(muItem).join("")}</ul>`:`<p class="empty">No standout tough matchups.</p>`}</div></div>`;
+  // --- 4. Hot streaks
+  const seen = new Set(), hot = [];
+  PR.forEach(r=>{ const k = r.n+"|"+r.st; if (seen.has(k)) return; seen.add(k); const s = streakFor(r.n, r.st); if (s) hot.push({r, s}); });
+  const score = x => x.r.st==="tds" ? x.s.s*20 : x.s.mark * (x.r.st==="receptions"?15:x.r.st==="passing_yards"?.35:1) * (x.s.hits/x.s.of);
+  hot.sort((a,b)=>score(b)-score(a));
+  h += `<h2 class="sub">Hot streaks</h2><div class="recap-card">${hot.length?`<ul class="picks cols">${hot.slice(0,14).map(({r,s})=>`<li>${teamBadge(r.tm)}<b>${plink(r.n)}</b><small>${s.text[0].toUpperCase()+s.text.slice(1)}. Faces ${TNAME[r.opp]||r.opp} this week.</small></li>`).join("")}</ul>`:`<p class="empty">No long streaks among this week's players.</p>`}</div>`;
+  box.innerHTML = h; wireLinks(box);
+}
+renderBest();
+
 // ---------- Ask the model (AI assistant, uses the viewer's Claude account) ----------
 (function(){
   const ASK = {turns: [], busy: false, ctl: null};
@@ -2470,7 +2767,7 @@ newQuiz();
          .filter(g=>(g.spread_edge_pts||0)>=2 || (g.total_edge_pts||0)>=3).sort((a,b)=>Math.max(b.spread_edge_pts||0,b.total_edge_pts||0)-Math.max(a.spread_edge_pts||0,a.total_edge_pts||0)).slice(0,8);
        const props = PR.map(r=>({r,e:evalRow(r)})).filter(x=>x.e.p!=null && x.e.edge>=thr).sort((a,b)=>b.e.edge-a.e.edge).slice(0,12).map(x=>propOut(x.r));
        return {week:PM.week, games, props, props_with_lines: PR.filter(r=>evalRow(r).p!=null).length,
-         note: props.length ? undefined : "No player props have lines yet. Props need sportsbook lines (Odds API key) or lines typed in on the Player props tab."}; }},
+         note: props.length ? undefined : "No player props have lines yet. Props need sportsbook lines (Odds API key) or lines typed in on the Betting tab."}; }},
     {name:"get_games", description:"Games for a week (default: the current week): Vegas spread, total and moneyline, the model's spread, win chance and total, weather, notable injuries, and final scores for finished games. Optional team filter.",
      inputSchema:{type:"object", properties:{week:{type:"number"}, team:{type:"string", description:"Team name or abbreviation"}}},
      execute(i){ status("Checking the games"); const wk = Number(i.week)||PM.week, tm = findTeam(i.team);
